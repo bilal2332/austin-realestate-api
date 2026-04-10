@@ -2,6 +2,7 @@ from fastapi import FastAPI, Request
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from datetime import datetime, timedelta
+from twilio.rest import Client
 import pytz
 import os
 import json
@@ -16,6 +17,16 @@ SCOPES = [
 SPREADSHEET_ID = "1kdREpipKfSYCsj03csvG9brFYeQQu18Yxkp5DBRsPbo"
 CALENDAR_ID = "chbilal.2332@gmail.com"
 TIMEZONE = "America/Chicago"
+
+# Twilio setup
+TWILIO_ACCOUNT_SID = os.environ.get("TWILIO_ACCOUNT_SID")
+TWILIO_AUTH_TOKEN  = os.environ.get("TWILIO_AUTH_TOKEN")
+TWILIO_PHONE       = os.environ.get("TWILIO_PHONE", "+18449432902")
+AGENT_PHONE        = os.environ.get("AGENT_PHONE", "+17373345444")
+
+twilio_client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+
+# ── Helpers ────────────────────────────────────────────────────────────────
 
 def get_credentials():
     creds_json = os.environ.get("GOOGLE_CREDENTIALS_JSON")
@@ -41,9 +52,24 @@ def parse_money(value: str) -> int:
     else:
         return int(float(v.replace(" ", "")))
 
+def send_sms(to: str, body: str):
+    try:
+        message = twilio_client.messages.create(
+            body=body,
+            from_=TWILIO_PHONE,
+            to=to
+        )
+        print(f"SMS sent: {message.sid}")
+    except Exception as e:
+        print(f"SMS error: {e}")
+
+# ── Health Check ───────────────────────────────────────────────────────────
+
 @app.get("/")
 def root():
     return {"status": "Austin RE Agent API is running"}
+
+# ── Capture Lead ───────────────────────────────────────────────────────────
 
 @app.post("/capture_lead")
 async def capture_lead(request: Request):
@@ -70,7 +96,22 @@ async def capture_lead(request: Request):
         body={"values": row}
     ).execute()
 
+    # SMS Trigger 1 — Notify agent of new lead
+    send_sms(
+        to=AGENT_PHONE,
+        body=(
+            f"🏡 New Lead!\n"
+            f"Name: {data.get('name', '')}\n"
+            f"Phone: {data.get('phone', '')}\n"
+            f"Budget: {data.get('budget', '')}\n"
+            f"Intent: {data.get('intent', '')}\n"
+            f"Timeline: {data.get('timeline', '')}"
+        )
+    )
+
     return {"status": "success", "message": "Lead captured"}
+
+# ── Book Showing ───────────────────────────────────────────────────────────
 
 @app.post("/book_showing")
 async def book_showing(request: Request):
@@ -91,19 +132,15 @@ async def book_showing(request: Request):
                 "message": "I didn't receive a date. Could you please tell me what date and time works for you?"
             }
 
-        # Inject current year if missing
         if str(current_year) not in start_str:
-            # Handle MM-DD or MM-DD format
             if "T" not in start_str and len(start_str) <= 10:
                 start_str = f"{current_year}-{start_str}T10:00:00"
             elif "T" not in start_str:
                 start_str = f"{current_year}-{start_str}T10:00:00"
 
-        # Try full datetime format
         try:
             start_time = datetime.strptime(start_str, "%Y-%m-%dT%H:%M:%S")
         except ValueError:
-            # Try date-only — default to 10am
             start_time = datetime.strptime(start_str, "%Y-%m-%d")
             start_time = start_time.replace(hour=10, minute=0, second=0)
 
@@ -130,10 +167,25 @@ async def book_showing(request: Request):
 
     cal_service.events().insert(calendarId=CALENDAR_ID, body=event).execute()
 
+    # SMS Trigger 2 — Notify agent of new showing
+    send_sms(
+        to=AGENT_PHONE,
+        body=(
+            f"📅 Showing Booked!\n"
+            f"Name: {data.get('name', '')}\n"
+            f"Phone: {data.get('phone', '')}\n"
+            f"Time: {start_time.strftime('%B %d at %I:%M %p')}\n"
+            f"Budget: {data.get('budget', '')}\n"
+            f"Notes: {data.get('notes', '')}"
+        )
+    )
+
     return {
         "status": "success",
         "message": f"Showing booked for {start_time.strftime('%B %d at %I:%M %p')}"
     }
+
+# ── Search Listings ────────────────────────────────────────────────────────
 
 @app.post("/search_listings")
 async def search_listings(request: Request):
@@ -143,13 +195,11 @@ async def search_listings(request: Request):
     area = data.get("area", "").lower().strip()
     beds_raw = data.get("beds", "")
 
-    # Parse budget
     try:
         budget = parse_money(budget_raw)
     except Exception:
         budget = 99_999_999
 
-    # Parse beds
     try:
         beds = int(str(beds_raw).strip())
     except Exception:
@@ -171,29 +221,24 @@ async def search_listings(request: Request):
     listings = []
 
     for row in rows[1:]:
-        # Pad short rows
         while len(row) < len(headers):
             row.append("")
 
         listing = dict(zip(headers, row))
 
-        # Skip unavailable
         if listing.get("Status", "").lower() != "available":
             continue
 
-        # Parse listing price
         try:
             price = parse_money(listing.get("Price", "0"))
         except Exception:
             continue
 
-        # Parse listing beds
         try:
             listing_beds = int(listing.get("Beds", "0"))
         except Exception:
             listing_beds = 0
 
-        # Apply filters
         if price > budget:
             continue
         if area and area not in listing.get("Area", "").lower():
@@ -224,6 +269,18 @@ async def search_listings(request: Request):
             f"{l['address']} in {l['area']} — {l['price']}, "
             f"{l['beds']} bed/{l['baths']} bath, {l['sqft']} sqft. {l['notes']}"
         )
+
+    # SMS Trigger 3 — Notify agent when AI searches listings for a lead
+    send_sms(
+        to=AGENT_PHONE,
+        body=(
+            f"🔍 Listing Search!\n"
+            f"Area: {area or 'Any'}\n"
+            f"Budget: {budget_raw}\n"
+            f"Beds: {beds_raw or 'Any'}\n"
+            f"Matches found: {len(top)}"
+        )
+    )
 
     return {
         "status": "success",
