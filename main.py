@@ -3,6 +3,7 @@ from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from datetime import datetime, timedelta
 from twilio.rest import Client
+import httpx
 import pytz
 import os
 import json
@@ -21,10 +22,102 @@ TIMEZONE = "America/Chicago"
 # Twilio setup
 TWILIO_ACCOUNT_SID = os.environ.get("TWILIO_ACCOUNT_SID")
 TWILIO_AUTH_TOKEN  = os.environ.get("TWILIO_AUTH_TOKEN")
-TWILIO_PHONE       = os.environ.get("TWILIO_PHONE", "+18449432902")
+TWILIO_PHONE       = os.environ.get("TWILIO_PHONE", "+17373345444")
 AGENT_PHONE        = os.environ.get("AGENT_PHONE", "+17373345444")
 
 twilio_client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+
+# Google Maps setup
+GOOGLE_MAPS_API_KEY = os.environ.get("GOOGLE_MAPS_API_KEY")
+
+# Hardcoded Austin neighborhood data
+NEIGHBORHOOD_DATA = {
+    "south congress": {
+        "vibe": "Trendy, artsy, walkable. Known for unique shops, live music, and restaurants.",
+        "demographics": "Young professionals and creatives, ages 25-40.",
+        "crime": "Low to moderate. Generally safe, busy streets.",
+        "avg_price": "$620,000",
+        "best_for": "First-time buyers who want walkable urban lifestyle."
+    },
+    "hyde park": {
+        "vibe": "Quiet, historic, tree-lined streets. Very walkable near UT Austin.",
+        "demographics": "Mix of students, professors, and established families.",
+        "crime": "Low. One of Austin's safest central neighborhoods.",
+        "avg_price": "$580,000",
+        "best_for": "Families and academics who want charm and quiet."
+    },
+    "mueller": {
+        "vibe": "Modern planned community, parks everywhere, very family friendly.",
+        "demographics": "Young families and professionals, ages 30-45.",
+        "crime": "Very low. Master-planned with security in mind.",
+        "avg_price": "$550,000",
+        "best_for": "Families wanting new construction and community feel."
+    },
+    "east austin": {
+        "vibe": "Hip, eclectic, rapidly growing. Best food and bar scene in Austin.",
+        "demographics": "Millennials, artists, young professionals.",
+        "crime": "Moderate. Improving rapidly as area develops.",
+        "avg_price": "$650,000",
+        "best_for": "Buyers who want culture, nightlife, and investment potential."
+    },
+    "zilker": {
+        "vibe": "Outdoor lover's paradise. Next to Barton Springs and Lady Bird Lake.",
+        "demographics": "Active professionals and families, ages 28-45.",
+        "crime": "Low. Very desirable area.",
+        "avg_price": "$900,000",
+        "best_for": "Outdoor enthusiasts who want a premium location."
+    },
+    "domain": {
+        "vibe": "Upscale, tech hub, luxury shopping and dining. Austin's second downtown.",
+        "demographics": "Tech workers, young professionals, transplants.",
+        "crime": "Very low. Well-patrolled area.",
+        "avg_price": "$480,000",
+        "best_for": "Tech workers at Apple, Dell, Google wanting a short commute."
+    },
+    "brentwood": {
+        "vibe": "Quiet, established, classic Austin neighborhood. Very residential.",
+        "demographics": "Long-term Austin families and retirees.",
+        "crime": "Very low. Tight-knit community.",
+        "avg_price": "$700,000",
+        "best_for": "Buyers wanting a stable neighborhood close to downtown."
+    },
+    "south lamar": {
+        "vibe": "Vibrant, restaurant-heavy, great nightlife. Very Austin feel.",
+        "demographics": "Young professionals and couples, ages 25-38.",
+        "crime": "Low to moderate.",
+        "avg_price": "$680,000",
+        "best_for": "Buyers who love food, music, and Austin culture."
+    },
+    "cedar park": {
+        "vibe": "Suburban, family-oriented, great schools, quieter pace.",
+        "demographics": "Families with children, ages 30-50.",
+        "crime": "Very low. One of the safest suburbs.",
+        "avg_price": "$420,000",
+        "best_for": "Families wanting space, top schools, and lower prices."
+    },
+    "round rock": {
+        "vibe": "Large suburb, great for families, home of Dell headquarters.",
+        "demographics": "Families and corporate workers.",
+        "crime": "Very low.",
+        "avg_price": "$390,000",
+        "best_for": "Budget-conscious families wanting good schools and space."
+    },
+    "westlake": {
+        "vibe": "Affluent, prestigious, rolling hills. Top-rated schools in Texas.",
+        "demographics": "High-income families.",
+        "crime": "Extremely low.",
+        "avg_price": "$1,400,000",
+        "best_for": "Luxury buyers wanting the best schools and exclusivity."
+    },
+    "travis heights": {
+        "vibe": "Charming, hilly, eclectic. Walking distance to South Congress.",
+        "demographics": "Artists, professionals, long-term Austinites.",
+        "crime": "Low.",
+        "avg_price": "$750,000",
+        "best_for": "Buyers wanting character homes and walkable lifestyle."
+    }
+}
+
 
 # ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -36,7 +129,6 @@ def get_credentials():
     )
 
 def parse_money(value: str) -> int:
-    """Convert any money format to integer. $2,000,000 / 2 million / two million → 2000000"""
     v = str(value).lower().replace("$", "").replace(",", "").strip()
     word_map = {
         "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
@@ -63,11 +155,13 @@ def send_sms(to: str, body: str):
     except Exception as e:
         print(f"SMS error: {e}")
 
+
 # ── Health Check ───────────────────────────────────────────────────────────
 
 @app.get("/")
 def root():
     return {"status": "Austin RE Agent API is running"}
+
 
 # ── Capture Lead ───────────────────────────────────────────────────────────
 
@@ -96,7 +190,6 @@ async def capture_lead(request: Request):
         body={"values": row}
     ).execute()
 
-    # SMS Trigger 1 — Notify agent of new lead
     send_sms(
         to=AGENT_PHONE,
         body=(
@@ -110,6 +203,7 @@ async def capture_lead(request: Request):
     )
 
     return {"status": "success", "message": "Lead captured"}
+
 
 # ── Book Showing ───────────────────────────────────────────────────────────
 
@@ -167,7 +261,6 @@ async def book_showing(request: Request):
 
     cal_service.events().insert(calendarId=CALENDAR_ID, body=event).execute()
 
-    # SMS Trigger 2 — Notify agent of new showing
     send_sms(
         to=AGENT_PHONE,
         body=(
@@ -184,6 +277,7 @@ async def book_showing(request: Request):
         "status": "success",
         "message": f"Showing booked for {start_time.strftime('%B %d at %I:%M %p')}"
     }
+
 
 # ── Search Listings ────────────────────────────────────────────────────────
 
@@ -270,7 +364,6 @@ async def search_listings(request: Request):
             f"{l['beds']} bed/{l['baths']} bath, {l['sqft']} sqft. {l['notes']}"
         )
 
-    # SMS Trigger 3 — Notify agent when AI searches listings for a lead
     send_sms(
         to=AGENT_PHONE,
         body=(
@@ -287,4 +380,85 @@ async def search_listings(request: Request):
         "count": len(top),
         "listings": top,
         "summary": " | ".join(summary)
+    }
+
+
+# ── Neighborhood Intel ─────────────────────────────────────────────────────
+
+@app.post("/neighborhood_intel")
+async def neighborhood_intel(request: Request):
+    data = await request.json()
+    neighborhood = data.get("neighborhood", "").lower().strip()
+
+    matched = None
+    for key in NEIGHBORHOOD_DATA:
+        if key in neighborhood or neighborhood in key:
+            matched = key
+            break
+
+    if not matched:
+        available = ", ".join([n.title() for n in NEIGHBORHOOD_DATA.keys()])
+        return {
+            "status": "not_found",
+            "message": f"I don't have data for that neighborhood yet. I currently cover: {available}."
+        }
+
+    info = NEIGHBORHOOD_DATA[matched]
+
+    # Get commute time to downtown Austin
+    commute_text = "unavailable"
+    try:
+        origin = f"{matched.replace(' ', '+')}+Austin+TX"
+        destination = "Downtown+Austin+TX"
+        maps_url = (
+            f"https://maps.googleapis.com/maps/api/distancematrix/json"
+            f"?origins={origin}&destinations={destination}"
+            f"&mode=driving&key={GOOGLE_MAPS_API_KEY}"
+        )
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(maps_url)
+            maps_data = resp.json()
+            commute_text = maps_data["rows"][0]["elements"][0]["duration"]["text"]
+    except Exception as e:
+        print(f"Maps API error: {e}")
+
+    # Get nearby restaurants
+    nearby_text = "unavailable"
+    try:
+        places_url = (
+            f"https://maps.googleapis.com/maps/api/place/textsearch/json"
+            f"?query=restaurants+in+{matched.replace(' ', '+')}+Austin+TX"
+            f"&key={GOOGLE_MAPS_API_KEY}"
+        )
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(places_url)
+            places_data = resp.json()
+            results = places_data.get("results", [])[:3]
+            if results:
+                names = [r["name"] for r in results]
+                nearby_text = ", ".join(names)
+    except Exception as e:
+        print(f"Places API error: {e}")
+
+    summary = (
+        f"{matched.title()} neighborhood: {info['vibe']} "
+        f"Average home price is {info['avg_price']}. "
+        f"Crime level: {info['crime']} "
+        f"Residents: {info['demographics']} "
+        f"Drive to downtown Austin: {commute_text}. "
+        f"Popular nearby spots: {nearby_text}. "
+        f"Best for: {info['best_for']}"
+    )
+
+    return {
+        "status": "success",
+        "neighborhood": matched.title(),
+        "avg_price": info["avg_price"],
+        "vibe": info["vibe"],
+        "crime": info["crime"],
+        "demographics": info["demographics"],
+        "commute_to_downtown": commute_text,
+        "nearby_restaurants": nearby_text,
+        "best_for": info["best_for"],
+        "summary": summary
     }
