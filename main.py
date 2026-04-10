@@ -24,7 +24,6 @@ def get_credentials():
     return service_account.Credentials.from_service_account_info(
         creds_dict, scopes=SCOPES
     )
-    )
 
 @app.get("/")
 def root():
