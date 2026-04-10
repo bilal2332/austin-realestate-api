@@ -16,9 +16,14 @@ SPREADSHEET_ID = "1kdREpipKfSYCsj03csvG9brFYeQQu18Yxkp5DBRsPbo"
 CALENDAR_ID = "chbilal.2332@gmail.com"
 TIMEZONE = "America/Chicago"
 
+import json
+
 def get_credentials():
-    return service_account.Credentials.from_service_account_file(
-        "credentials.json", scopes=SCOPES
+    creds_json = os.environ.get("GOOGLE_CREDENTIALS_JSON")
+    creds_dict = json.loads(creds_json)
+    return service_account.Credentials.from_service_account_info(
+        creds_dict, scopes=SCOPES
+    )
     )
 
 @app.get("/")
