@@ -24,6 +24,23 @@ def get_credentials():
         creds_dict, scopes=SCOPES
     )
 
+def parse_money(value: str) -> int:
+    """Convert any money format to integer. $2,000,000 / 2 million / two million → 2000000"""
+    v = str(value).lower().replace("$", "").replace(",", "").strip()
+    word_map = {
+        "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+        "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10
+    }
+    if "million" in v:
+        num = v.replace("million", "").strip()
+        num = word_map.get(num, float(num) if num else 1)
+        return int(float(num) * 1_000_000)
+    elif "thousand" in v or v.endswith("k"):
+        num = v.replace("thousand", "").replace("k", "").strip()
+        return int(float(num) * 1_000)
+    else:
+        return int(float(v.replace(" ", "")))
+
 @app.get("/")
 def root():
     return {"status": "Austin RE Agent API is running"}
@@ -63,19 +80,50 @@ async def book_showing(request: Request):
     cal_service = build("calendar", "v3", credentials=creds)
 
     tz = pytz.timezone(TIMEZONE)
+    current_year = datetime.now(tz).year
+
     try:
-        start_str = data.get("datetime", "")
-        start_time = datetime.strptime(start_str, "%Y-%m-%dT%H:%M:%S")
+        start_str = data.get("datetime", "").strip()
+
+        if not start_str:
+            return {
+                "status": "error",
+                "message": "I didn't receive a date. Could you please tell me what date and time works for you?"
+            }
+
+        # Inject current year if missing
+        if str(current_year) not in start_str:
+            # Handle MM-DD or MM-DD format
+            if "T" not in start_str and len(start_str) <= 10:
+                start_str = f"{current_year}-{start_str}T10:00:00"
+            elif "T" not in start_str:
+                start_str = f"{current_year}-{start_str}T10:00:00"
+
+        # Try full datetime format
+        try:
+            start_time = datetime.strptime(start_str, "%Y-%m-%dT%H:%M:%S")
+        except ValueError:
+            # Try date-only — default to 10am
+            start_time = datetime.strptime(start_str, "%Y-%m-%d")
+            start_time = start_time.replace(hour=10, minute=0, second=0)
+
         start_time = tz.localize(start_time)
-    except:
-        tomorrow = datetime.now(tz) + timedelta(days=1)
-        start_time = tomorrow.replace(hour=10, minute=0, second=0, microsecond=0)
+
+    except Exception:
+        return {
+            "status": "error",
+            "message": "I couldn't understand that date and time. Could you please repeat it? For example, April 13th at 2pm."
+        }
 
     end_time = start_time + timedelta(hours=1)
 
     event = {
         "summary": f"Property Showing — {data.get('name', 'Prospect')}",
-        "description": f"Phone: {data.get('phone', '')}\nBudget: {data.get('budget', '')}\nNotes: {data.get('notes', '')}",
+        "description": (
+            f"Phone: {data.get('phone', '')}\n"
+            f"Budget: {data.get('budget', '')}\n"
+            f"Notes: {data.get('notes', '')}"
+        ),
         "start": {"dateTime": start_time.isoformat(), "timeZone": TIMEZONE},
         "end": {"dateTime": end_time.isoformat(), "timeZone": TIMEZONE},
     }
@@ -95,16 +143,16 @@ async def search_listings(request: Request):
     area = data.get("area", "").lower().strip()
     beds_raw = data.get("beds", "")
 
-    # Parse budget — strip $, commas, convert to int
+    # Parse budget
     try:
-        budget = int(str(budget_raw).replace("$", "").replace(",", "").replace(" ", ""))
-    except:
-        budget = 99999999
+        budget = parse_money(budget_raw)
+    except Exception:
+        budget = 99_999_999
 
     # Parse beds
     try:
         beds = int(str(beds_raw).strip())
-    except:
+    except Exception:
         beds = 0
 
     creds = get_credentials()
@@ -135,25 +183,21 @@ async def search_listings(request: Request):
 
         # Parse listing price
         try:
-            price = int(str(listing.get("Price", "0")).replace("$", "").replace(",", "").replace(" ", ""))
-        except:
+            price = parse_money(listing.get("Price", "0"))
+        except Exception:
             continue
 
         # Parse listing beds
         try:
             listing_beds = int(listing.get("Beds", "0"))
-        except:
+        except Exception:
             listing_beds = 0
 
-        # Filter by budget
+        # Apply filters
         if price > budget:
             continue
-
-        # Filter by area if provided
         if area and area not in listing.get("Area", "").lower():
             continue
-
-        # Filter by beds if provided
         if beds and listing_beds < beds:
             continue
 
@@ -173,12 +217,12 @@ async def search_listings(request: Request):
             "message": "No listings found matching those criteria."
         }
 
-    # Return top 3 matches
     top = listings[:3]
     summary = []
     for l in top:
         summary.append(
-            f"{l['address']} in {l['area']} — {l['price']}, {l['beds']} bed/{l['baths']} bath, {l['sqft']} sqft. {l['notes']}"
+            f"{l['address']} in {l['area']} — {l['price']}, "
+            f"{l['beds']} bed/{l['baths']} bath, {l['sqft']} sqft. {l['notes']}"
         )
 
     return {
