@@ -1,7 +1,6 @@
 from fastapi import FastAPI, Request, Form, Query
 from fastapi.middleware.cors import CORSMiddleware
 from google.oauth2 import service_account
-from googleapiclient.discovery import build
 from datetime import datetime, timedelta
 from twilio.rest import Client
 import httpx
@@ -35,11 +34,21 @@ AGENT_PHONE        = os.environ.get("AGENT_PHONE", "+17373345444")
 twilio_client       = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
 GOOGLE_MAPS_API_KEY = os.environ.get("GOOGLE_MAPS_API_KEY")
 
-# ── Agent Toggle State (in-memory — controlled via dashboard or SMS) ───────
+# ── Agent Toggle State (in-memory) ─────────────────────────────────────────
 agent_state = {
-    "manual_override": None,   # None=schedule, True=forced ON, False=forced OFF
-    "meeting_until":   None    # datetime when meeting mode expires
-    ]
+    "manual_override": None,
+    "meeting_until":   None
+}
+
+# ── Working Hours ──────────────────────────────────────────────────────────
+WORKING_HOURS = {
+    "monday":    (9, 18),
+    "tuesday":   (9, 18),
+    "wednesday": (9, 18),
+    "thursday":  (9, 18),
+    "friday":    (9, 18),
+}
+
 # ── Neighborhood Data ──────────────────────────────────────────────────────
 NEIGHBORHOOD_DATA = {
     "south congress":  {"vibe": "Trendy, artsy, walkable.", "demographics": "Young professionals, ages 25-40.", "crime": "Low to moderate.", "avg_price": "$620,000", "best_for": "First-time buyers wanting walkable urban lifestyle."},
@@ -91,7 +100,6 @@ def is_within_working_hours() -> bool:
     return hours[0] <= now.hour < hours[1]
 
 def should_ai_handle_call() -> bool:
-    """Priority: meeting mode > manual override > schedule."""
     tz  = pytz.timezone(TIMEZONE)
     now = datetime.now(tz)
     if agent_state["meeting_until"]:
@@ -242,6 +250,7 @@ async def sms_toggle(request: Request):
 
 @app.post("/capture_lead")
 async def capture_lead(request: Request):
+    from googleapiclient.discovery import build
     data    = await request.json()
     service = build("sheets", "v4", credentials=get_credentials())
 
@@ -277,6 +286,7 @@ async def capture_lead(request: Request):
 
 @app.post("/book_showing")
 async def book_showing(request: Request):
+    from googleapiclient.discovery import build
     data         = await request.json()
     cal_service  = build("calendar", "v3", credentials=get_credentials())
     tz           = pytz.timezone(TIMEZONE)
@@ -317,6 +327,7 @@ async def book_showing(request: Request):
 
 @app.post("/search_listings")
 async def search_listings(request: Request):
+    from googleapiclient.discovery import build
     data       = await request.json()
     budget_raw = data.get("budget", "")
     area       = data.get("area", "").lower().strip()
