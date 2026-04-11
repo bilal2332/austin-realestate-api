@@ -1,4 +1,5 @@
-from fastapi import FastAPI, Request, Form
+from fastapi import FastAPI, Request, Form, Query
+from fastapi.middleware.cors import CORSMiddleware
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from datetime import datetime, timedelta
@@ -9,6 +10,13 @@ import os
 import json
 
 app = FastAPI()
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
@@ -27,27 +35,12 @@ AGENT_PHONE        = os.environ.get("AGENT_PHONE", "+17373345444")
 twilio_client       = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
 GOOGLE_MAPS_API_KEY = os.environ.get("GOOGLE_MAPS_API_KEY")
 
-# ── Agent Toggle State (in-memory cache) ──────────────────────────────────
-# This is updated on every call to /agent/status by reading the Google Sheet
+# ── Agent Toggle State (in-memory — controlled via dashboard or SMS) ───────
 agent_state = {
     "manual_override": None,   # None=schedule, True=forced ON, False=forced OFF
     "meeting_until":   None    # datetime when meeting mode expires
-}
-
-# ── Working Hours ─────────────────────────────────────────────────────────
-# During working hours  → AI OFF (realtor takes calls)
-# Outside working hours → AI ON  (Ashley handles calls)
-WORKING_HOURS = {
-    "monday":    (9, 18),
-    "tuesday":   (9, 18),
-    "wednesday": (9, 18),
-    "thursday":  (9, 18),
-    "friday":    (9, 17),
-    "saturday":  (10, 14),
-    "sunday":    None           # day off → AI ON all day
-}
-
-# ── Neighborhood Data ─────────────────────────────────────────────────────
+    ]
+# ── Neighborhood Data ──────────────────────────────────────────────────────
 NEIGHBORHOOD_DATA = {
     "south congress":  {"vibe": "Trendy, artsy, walkable.", "demographics": "Young professionals, ages 25-40.", "crime": "Low to moderate.", "avg_price": "$620,000", "best_for": "First-time buyers wanting walkable urban lifestyle."},
     "hyde park":       {"vibe": "Quiet, historic, tree-lined.", "demographics": "Students, professors, families.", "crime": "Low.", "avg_price": "$580,000", "best_for": "Families wanting charm and quiet."},
@@ -64,7 +57,7 @@ NEIGHBORHOOD_DATA = {
 }
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────
+# ── Helpers ────────────────────────────────────────────────────────────────
 
 def get_credentials():
     creds_dict = json.loads(os.environ.get("GOOGLE_CREDENTIALS_JSON"))
@@ -111,79 +104,24 @@ def should_ai_handle_call() -> bool:
     return not is_within_working_hours()
 
 
-# ── Google Sheet State Sync ───────────────────────────────────────────────
-
-def save_agent_state_to_sheet():
-    """Saves current agent state to Settings!B2:C2."""
-    try:
-        service = build("sheets", "v4", credentials=get_credentials())
-        tz = pytz.timezone(TIMEZONE)
-        meeting_str = (
-            agent_state["meeting_until"].astimezone(tz).strftime("%Y-%m-%dT%H:%M:%S")
-            if agent_state["meeting_until"] else ""
-        )
-        service.spreadsheets().values().update(
-            spreadsheetId=SPREADSHEET_ID,
-            range="Settings!B2:C2",
-            valueInputOption="RAW",
-            body={"values": [[str(agent_state["manual_override"]), meeting_str]]}
-        ).execute()
-    except Exception as e:
-        print(f"Sheet save error: {e}")
-
-def load_agent_state_from_sheet():
-    """
-    Reads Settings!B2:C2 and updates in-memory agent_state.
-    Called on startup AND on every incoming call via /agent/status.
-    This means editing the Google Sheet takes effect immediately on the next call.
-    """
-    try:
-        service = build("sheets", "v4", credentials=get_credentials())
-        result  = service.spreadsheets().values().get(
-            spreadsheetId=SPREADSHEET_ID, range="Settings!B2:C2"
-        ).execute()
-        rows = result.get("values", [])
-        if rows and rows[0]:
-            row = rows[0]
-            ov  = row[0] if len(row) > 0 else "None"
-            mt  = row[1] if len(row) > 1 else ""
-            agent_state["manual_override"] = True if ov == "True" else False if ov == "False" else None
-            if mt:
-                tz = pytz.timezone(TIMEZONE)
-                agent_state["meeting_until"] = tz.localize(datetime.strptime(mt, "%Y-%m-%dT%H:%M:%S"))
-            else:
-                agent_state["meeting_until"] = None
-        print(f"State loaded: {agent_state}")
-    except Exception as e:
-        print(f"Sheet load error: {e}")
-
-@app.on_event("startup")
-async def startup_event():
-    load_agent_state_from_sheet()
-
-
-# ── Health Check ──────────────────────────────────────────────────────────
+# ── Health Check ───────────────────────────────────────────────────────────
 
 @app.get("/")
 def root():
     return {"status": "Austin RE Agent API is running"}
 
 
-# ── Agent Status ──────────────────────────────────────────────────────────
-# Retell calls this at the start of every call.
-# Reads Google Sheet live so any manual edit to the sheet takes effect immediately.
+# ── Agent Status ───────────────────────────────────────────────────────────
 
 @app.get("/agent/status")
 def get_agent_status():
-    load_agent_state_from_sheet()       # ← reads sheet on EVERY call (live sync)
     tz  = pytz.timezone(TIMEZONE)
     now = datetime.now(tz)
     ai_on = should_ai_handle_call()
     meeting_active = bool(agent_state["meeting_until"] and now < agent_state["meeting_until"])
     meeting_remaining = ""
     if meeting_active:
-        mins = int((agent_state["meeting_until"] - now).total_seconds() / 60)
-        meeting_remaining = f"{mins} minutes remaining"
+        meeting_remaining = agent_state["meeting_until"].strftime("%-I:%M %p")
     return {
         "enabled":              ai_on,
         "mode":                 "meeting" if meeting_active else "manual" if agent_state["manual_override"] is not None else "schedule",
@@ -193,9 +131,37 @@ def get_agent_status():
     }
 
 
-# ── SMS Toggle ────────────────────────────────────────────────────────────
-# Commands: ON | OFF | MEETING N | SCHEDULE | STATUS
-# All changes are saved to Google Sheet so they survive server restarts.
+# ── Dashboard Control Endpoints ────────────────────────────────────────────
+
+@app.post("/agent/enable")
+def agent_enable():
+    agent_state["manual_override"] = True
+    agent_state["meeting_until"]   = None
+    return {"ok": True, "enabled": True, "mode": "manual"}
+
+@app.post("/agent/disable")
+def agent_disable():
+    agent_state["manual_override"] = False
+    agent_state["meeting_until"]   = None
+    return {"ok": True, "enabled": False, "mode": "manual"}
+
+@app.post("/agent/schedule")
+def agent_schedule():
+    agent_state["manual_override"] = None
+    agent_state["meeting_until"]   = None
+    ai_on = should_ai_handle_call()
+    return {"ok": True, "enabled": ai_on, "mode": "schedule"}
+
+@app.post("/agent/meeting")
+def agent_meeting(hours: int = Query(default=1)):
+    tz    = pytz.timezone(TIMEZONE)
+    until = datetime.now(tz) + timedelta(hours=hours)
+    agent_state["meeting_until"]   = until
+    agent_state["manual_override"] = None
+    return {"ok": True, "meeting_until": until.isoformat(), "meeting_active": True}
+
+
+# ── SMS Toggle ─────────────────────────────────────────────────────────────
 
 @app.post("/sms_toggle")
 async def sms_toggle(request: Request):
@@ -215,7 +181,6 @@ async def sms_toggle(request: Request):
         except: hours = 1
         agent_state["meeting_until"]   = now + timedelta(hours=hours)
         agent_state["manual_override"] = None
-        save_agent_state_to_sheet()
         until_str = agent_state["meeting_until"].strftime("%I:%M %p")
         send_sms(AGENT_PHONE,
             f"Meeting mode ON for {hours} hour(s).\n"
@@ -226,7 +191,6 @@ async def sms_toggle(request: Request):
     elif body == "on":
         agent_state["manual_override"] = True
         agent_state["meeting_until"]   = None
-        save_agent_state_to_sheet()
         send_sms(AGENT_PHONE,
             "Ashley is now ON (manual override).\n"
             "She handles all calls until you text OFF or SCHEDULE."
@@ -235,7 +199,6 @@ async def sms_toggle(request: Request):
     elif body == "off":
         agent_state["manual_override"] = False
         agent_state["meeting_until"]   = None
-        save_agent_state_to_sheet()
         send_sms(AGENT_PHONE,
             "Ashley is now OFF (manual override).\n"
             "Calls ring directly to you until you text ON or SCHEDULE."
@@ -244,7 +207,6 @@ async def sms_toggle(request: Request):
     elif body == "schedule":
         agent_state["manual_override"] = None
         agent_state["meeting_until"]   = None
-        save_agent_state_to_sheet()
         send_sms(AGENT_PHONE,
             "Ashley is back on AUTO SCHEDULE.\n"
             "AI OFF during working hours.\n"
@@ -276,7 +238,7 @@ async def sms_toggle(request: Request):
     return {"status": "ok"}
 
 
-# ── Capture Lead ──────────────────────────────────────────────────────────
+# ── Capture Lead ───────────────────────────────────────────────────────────
 
 @app.post("/capture_lead")
 async def capture_lead(request: Request):
@@ -311,7 +273,7 @@ async def capture_lead(request: Request):
     return {"status": "success", "message": "Lead captured"}
 
 
-# ── Book Showing ──────────────────────────────────────────────────────────
+# ── Book Showing ───────────────────────────────────────────────────────────
 
 @app.post("/book_showing")
 async def book_showing(request: Request):
@@ -351,7 +313,7 @@ async def book_showing(request: Request):
     return {"status": "success", "message": f"Showing booked for {start_time.strftime('%B %d at %I:%M %p')}"}
 
 
-# ── Search Listings ───────────────────────────────────────────────────────
+# ── Search Listings ────────────────────────────────────────────────────────
 
 @app.post("/search_listings")
 async def search_listings(request: Request):
@@ -411,7 +373,7 @@ async def search_listings(request: Request):
     return {"status": "success", "count": len(top), "listings": top, "summary": " | ".join(summary)}
 
 
-# ── Neighborhood Intel ────────────────────────────────────────────────────
+# ── Neighborhood Intel ─────────────────────────────────────────────────────
 
 @app.post("/neighborhood_intel")
 async def neighborhood_intel(request: Request):
