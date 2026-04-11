@@ -439,3 +439,19 @@ async def neighborhood_intel(request: Request):
             f"Best for: {info['best_for']}"
         )
     }
+# ── Web Call Token (for demo page) ────────────────────────────────────────
+
+@app.post("/create_web_call")
+async def create_web_call(request: Request):
+    data     = await request.json()
+    agent_id = data.get("agent_id", "")
+    async with httpx.AsyncClient() as client:
+        res = await client.post(
+            "https://api.retellai.com/v2/create-web-call",
+            headers={
+                "Authorization": f"Bearer {os.environ.get('RETELL_API_KEY')}",
+                "Content-Type": "application/json"
+            },
+            json={"agent_id": agent_id}
+        )
+    return res.json()
