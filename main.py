@@ -185,14 +185,26 @@ def _existing_prospect_urls(service) -> set:
     ).execute()
     return {r[0] for r in result.get("values", []) if r}
 
-def _fetch_listing_urls() -> list:
+def _fetch_listings_from_search() -> list:
+    """Scrape title, price, location, URL directly from search results page."""
     url = _scraper_url(CL_FSBO_URL) if SCRAPER_API_KEY else CL_FSBO_URL
     resp = requests.get(url, headers=CL_HEADERS, timeout=30)
     resp.raise_for_status()
-    soup  = BeautifulSoup(resp.text, "html.parser")
-    links = soup.select("li.cl-static-search-result a")
-    print(f"Found {len(links)} listing links on Craigslist")
-    return [a["href"] for a in links if a.get("href")]
+    soup = BeautifulSoup(resp.text, "html.parser")
+    items = soup.select("li.cl-static-search-result")
+    print(f"Found {len(items)} listing links on Craigslist")
+    results = []
+    for item in items:
+        a = item.select_one("a")
+        if not a:
+            continue
+        results.append({
+            "title":    item.get("title", "N/A"),
+            "url":      a.get("href", ""),
+            "price":    (item.select_one(".price") or type('', (), {'get_text': lambda *a, **k: 'N/A'})()).get_text(strip=True),
+            "location": (item.select_one(".location") or type('', (), {'get_text': lambda *a, **k: 'N/A'})()).get_text(strip=True),
+        })
+    return results
 
 def _parse_listing(url: str) -> dict | None:
     try:
@@ -234,26 +246,28 @@ def run_fsbo_scraper() -> dict:
     service = _get_sheets_service()
     _ensure_prospects_tab(service)
     seen     = _existing_prospect_urls(service)
-    urls     = _fetch_listing_urls()
+    listings = _fetch_listings_from_search()
     new_rows = []
 
-    for url in urls:
-        if url in seen:
-            continue
-        data = _parse_listing(url)
-        if not data:
+    for listing in listings:
+        url = listing["url"]
+        if not url or url in seen:
             continue
         row = [
             datetime.now(pytz.timezone(TIMEZONE)).strftime("%Y-%m-%d %H:%M"),
-            data["title"], data["price"], data["location"],
-            data["phone"], url,
-            data["beds"], data["baths"], data["sqft"],
-            data["snippet"],
+            listing["title"],
+            listing["price"],
+            listing["location"],
+            "N/A",   # phone - hidden by Craigslist JS
+            url,
+            "N/A",   # beds
+            "N/A",   # baths
+            "N/A",   # sqft
+            "",      # snippet
             "New"
         ]
         new_rows.append(row)
         seen.add(url)
-        time.sleep(1.2)
 
     if new_rows:
         service.spreadsheets().values().append(
@@ -263,7 +277,7 @@ def run_fsbo_scraper() -> dict:
             body={"values": new_rows}
         ).execute()
 
-    summary = {"scraped": len(urls), "new": len(new_rows)}
+    summary = {"scraped": len(listings), "new": len(new_rows)}
     print(f"FSBO scrape done — {summary}")
     return summary
 
