@@ -187,16 +187,22 @@ def _existing_prospect_urls(service) -> set:
 
 def _fetch_listing_urls() -> list:
     url = _scraper_url(CL_FSBO_URL) if SCRAPER_API_KEY else CL_FSBO_URL
-    print(f"[DEBUG] SCRAPER_API_KEY set: {bool(SCRAPER_API_KEY)}")
-    print(f"[DEBUG] Fetching: {url[:100]}")
     resp = requests.get(url, headers=CL_HEADERS, timeout=30)
-    print(f"[DEBUG] Status: {resp.status_code}, Length: {len(resp.text)}")
-    print(f"[DEBUG] HTML: {resp.text[:800]}")
     resp.raise_for_status()
-    soup  = BeautifulSoup(resp.text, "html.parser")
-    links = soup.select("li.cl-search-result a.posting-title")
-    print(f"Found {len(links)} listing links on Craigslist")
-    return [a["href"] for a in links if a.get("href")]
+    soup = BeautifulSoup(resp.text, "html.parser")
+    script_tag = soup.select_one("script[id='ld_searchpage_results']")
+    if not script_tag:
+        print("No ld_searchpage_results script tag found")
+        return []
+    items = json.loads(script_tag.text).get("itemListElement", [])
+    urls = []
+    for entry in items:
+        item = entry.get("item", {})
+        link = item.get("url") or item.get("@id")
+        if link:
+            urls.append(link)
+    print(f"Found {len(urls)} listing links on Craigslist")
+    return urls
     
 
 def _parse_listing(url: str) -> dict | None:
@@ -213,7 +219,7 @@ def _parse_listing(url: str) -> dict | None:
         price_tag = soup.select_one(".price")
         price     = price_tag.get_text(strip=True) if price_tag else "N/A"
 
-        loc_tag   = soup.select_one(".mapaddress, #map")
+        loc_tag   = soup.select_one(".mapaddress")
         location  = loc_tag.get_text(strip=True) if loc_tag else "N/A"
 
         body_tag  = soup.select_one("#postingbody")
