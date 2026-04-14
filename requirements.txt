@@ -6,3 +6,5 @@ pytz
 python-multipart
 twilio
 httpx
+requests
+beautifulsoup4
