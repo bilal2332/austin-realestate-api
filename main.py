@@ -189,21 +189,10 @@ def _fetch_listing_urls() -> list:
     url = _scraper_url(CL_FSBO_URL) if SCRAPER_API_KEY else CL_FSBO_URL
     resp = requests.get(url, headers=CL_HEADERS, timeout=30)
     resp.raise_for_status()
-    soup = BeautifulSoup(resp.text, "html.parser")
-    script_tag = soup.select_one("script[id='ld_searchpage_results']")
-    if not script_tag:
-        print("No ld_searchpage_results script tag found")
-        return []
-    items = json.loads(script_tag.text).get("itemListElement", [])
-    urls = []
-    for entry in items:
-        item = entry.get("item", {})
-        link = item.get("url") or item.get("@id")
-        if link:
-            urls.append(link)
-    print(f"Found {len(urls)} listing links on Craigslist")
-    return urls
-    
+    soup  = BeautifulSoup(resp.text, "html.parser")
+    links = soup.select("li.cl-static-search-result a")
+    print(f"Found {len(links)} listing links on Craigslist")
+    return [a["href"] for a in links if a.get("href")]
 
 def _parse_listing(url: str) -> dict | None:
     try:
