@@ -2,9 +2,9 @@ fastapi
 uvicorn
 google-auth
 google-api-python-client
-pytz
-python-multipart
 twilio
 httpx
+pytz
 requests
 beautifulsoup4
+python-multipart
