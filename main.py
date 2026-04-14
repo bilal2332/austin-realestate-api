@@ -253,6 +253,10 @@ def run_fsbo_scraper() -> dict:
         url = listing["url"]
         if not url or url in seen:
             continue
+            # Skip non-residential listings
+skip_keywords = ["warehouse", "office space", "commercial", "business", "storage", "cubework"]
+if any(kw in listing["title"].lower() for kw in skip_keywords):
+    continue
         row = [
             datetime.now(pytz.timezone(TIMEZONE)).strftime("%Y-%m-%d %H:%M"),
             listing["title"],
