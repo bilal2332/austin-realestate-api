@@ -768,3 +768,15 @@ async def mark_prospect(request: Request):
         body={"values": [[status]]},
     ).execute()
     return {"ok": True}
+
+
+@app.get("/prospects")
+def get_prospects():
+    service = _get_sheets_service()
+    result = service.spreadsheets().values().get(
+        spreadsheetId=SPREADSHEET_ID,
+        range=f"{PROSPECTS_SHEET_TAB}!A2:K"
+    ).execute()
+    rows = result.get("values", [])
+    keys = ["date","title","price","location","phone","url","beds","baths","sqft","snippet","status"]
+    return [dict(zip(keys, row)) for row in rows]
