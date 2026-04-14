@@ -12,7 +12,7 @@ import time
 import asyncio
 import requests
 from bs4 import BeautifulSoup
-#alfateh
+
 app = FastAPI()
 
 app.add_middleware(
@@ -42,7 +42,9 @@ GOOGLE_MAPS_API_KEY = os.environ.get("GOOGLE_MAPS_API_KEY")
 # ── FSBO Scraper Config ────────────────────────────────────────────────────
 RETELL_API_KEY     = os.environ.get("RETELL_API_KEY")
 RETELL_FROM_NUMBER = os.environ.get("RETELL_FROM_NUMBER", "+17373345444")
-RETELL_AGENT_ID    = os.environ.get("RETELL_FSBO_AGENT_ID")   # outbound FSBO agent
+RETELL_AGENT_ID    = os.environ.get("RETELL_FSBO_AGENT_ID")
+
+SCRAPER_API_KEY = os.environ.get("SCRAPER_API_KEY")
 
 CL_FSBO_URL = (
     "https://austin.craigslist.org/search/rea"
@@ -53,7 +55,10 @@ CL_HEADERS = {
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
         "Chrome/122.0.0.0 Safari/537.36"
-    )
+    ),
+    "Accept-Language": "en-US,en;q=0.9",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Referer": "https://www.google.com/",
 }
 PROSPECTS_SHEET_TAB = "Prospects"
 PROSPECTS_HEADERS   = [
@@ -62,19 +67,17 @@ PROSPECTS_HEADERS   = [
     "SqFt", "Description Snippet", "Status"
 ]
 
-# Regex helpers for listing detail parsing
 _PHONE_RE = re.compile(r"(\(?\d{3}\)?[\s.\-]?\d{3}[\s.\-]?\d{4})")
 _BED_RE   = re.compile(r"(\d+)\s*(?:bd|bed|bedroom)", re.I)
 _BATH_RE  = re.compile(r"(\d+(?:\.\d+)?)\s*(?:ba|bath|bathroom)", re.I)
 _SQFT_RE  = re.compile(r"([\d,]+)\s*(?:sq\s*ft|sqft|sf)", re.I)
 
-# ── Agent Toggle State (in-memory) ─────────────────────────────────────────
+# ── Agent Toggle State ─────────────────────────────────────────────────────
 agent_state = {
     "manual_override": None,
     "meeting_until":   None
 }
 
-# ── Working Hours ──────────────────────────────────────────────────────────
 WORKING_HOURS = {
     "monday":    (9, 18),
     "tuesday":   (9, 18),
@@ -83,7 +86,6 @@ WORKING_HOURS = {
     "friday":    (9, 18),
 }
 
-# ── Neighborhood Data ──────────────────────────────────────────────────────
 NEIGHBORHOOD_DATA = {
     "south congress":  {"vibe": "Trendy, artsy, walkable.", "demographics": "Young professionals, ages 25-40.", "crime": "Low to moderate.", "avg_price": "$620,000", "best_for": "First-time buyers wanting walkable urban lifestyle."},
     "hyde park":       {"vibe": "Quiet, historic, tree-lined.", "demographics": "Students, professors, families.", "crime": "Low.", "avg_price": "$580,000", "best_for": "Families wanting charm and quiet."},
@@ -152,12 +154,15 @@ def should_ai_handle_call() -> bool:
 # ── FSBO Scraper Helpers ───────────────────────────────────────────────────
 # ═══════════════════════════════════════════════════════════════════════════
 
+def _scraper_url(target: str) -> str:
+    """Route a URL through ScraperAPI to bypass Craigslist IP blocking."""
+    return f"http://api.scraperapi.com?api_key={SCRAPER_API_KEY}&url={target}"
+
 def _get_sheets_service():
     from googleapiclient.discovery import build
     return build("sheets", "v4", credentials=get_credentials())
 
 def _ensure_prospects_tab(service) -> None:
-    """Create the Prospects tab with headers if it doesn't exist yet."""
     meta = service.spreadsheets().get(spreadsheetId=SPREADSHEET_ID).execute()
     existing = [s["properties"]["title"] for s in meta.get("sheets", [])]
     if PROSPECTS_SHEET_TAB not in existing:
@@ -176,20 +181,23 @@ def _ensure_prospects_tab(service) -> None:
 def _existing_prospect_urls(service) -> set:
     result = service.spreadsheets().values().get(
         spreadsheetId=SPREADSHEET_ID,
-        range=f"{PROSPECTS_SHEET_TAB}!F2:F"   # URL column
+        range=f"{PROSPECTS_SHEET_TAB}!F2:F"
     ).execute()
     return {r[0] for r in result.get("values", []) if r}
 
 def _fetch_listing_urls() -> list:
-    resp = requests.get(CL_FSBO_URL, headers=CL_HEADERS, timeout=15)
+    url = _scraper_url(CL_FSBO_URL) if SCRAPER_API_KEY else CL_FSBO_URL
+    resp = requests.get(url, headers=CL_HEADERS, timeout=30)
     resp.raise_for_status()
     soup  = BeautifulSoup(resp.text, "html.parser")
     links = soup.select("li.cl-search-result a.posting-title")
+    print(f"Found {len(links)} listing links on Craigslist")
     return [a["href"] for a in links if a.get("href")]
 
 def _parse_listing(url: str) -> dict | None:
     try:
-        resp = requests.get(url, headers=CL_HEADERS, timeout=10)
+        fetch_url = _scraper_url(url) if SCRAPER_API_KEY else url
+        resp = requests.get(fetch_url, headers=CL_HEADERS, timeout=30)
         if resp.status_code != 200:
             return None
         soup = BeautifulSoup(resp.text, "html.parser")
@@ -223,10 +231,6 @@ def _parse_listing(url: str) -> dict | None:
         return None
 
 def run_fsbo_scraper() -> dict:
-    """
-    Core scraper logic — called by both the background task and the
-    manual /scrape_fsbo endpoint.  Returns a summary dict.
-    """
     service = _get_sheets_service()
     _ensure_prospects_tab(service)
     seen     = _existing_prospect_urls(service)
@@ -249,7 +253,7 @@ def run_fsbo_scraper() -> dict:
         ]
         new_rows.append(row)
         seen.add(url)
-        time.sleep(1.2)  # polite crawl delay
+        time.sleep(1.2)
 
     if new_rows:
         service.spreadsheets().values().append(
@@ -630,33 +634,17 @@ async def create_web_call(request: Request):
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# ── FSBO Prospects — NEW ENDPOINTS ─────────────────────────────────────────
+# ── FSBO Prospects Endpoints ───────────────────────────────────────────────
 # ═══════════════════════════════════════════════════════════════════════════
 
 @app.post("/scrape_fsbo")
 async def scrape_fsbo(background_tasks: BackgroundTasks):
-    """
-    Manually trigger an FSBO scrape.
-    Runs in the background so the request returns instantly.
-    The scraper saves new listings to the 'Prospects' sheet tab.
-
-    POST /scrape_fsbo
-    Response: { "ok": true, "message": "Scrape started in background" }
-    """
     background_tasks.add_task(run_fsbo_scraper)
     return {"ok": True, "message": "FSBO scrape started in background. Check the Prospects sheet in ~60s."}
 
 
 @app.get("/get_prospects")
 async def get_prospects(status: str = Query(default="all")):
-    """
-    Read all rows from the 'Prospects' sheet tab.
-    Optional ?status=New|Called|Not+Interested to filter.
-
-    GET /get_prospects
-    GET /get_prospects?status=New
-    Response: { "ok": true, "count": N, "prospects": [...] }
-    """
     service = _get_sheets_service()
     _ensure_prospects_tab(service)
 
@@ -671,7 +659,7 @@ async def get_prospects(status: str = Query(default="all")):
         while len(r) < 11:
             r.append("")
         p = {
-            "row_index":  i + 2,   # 1-indexed sheet row (row 1 = header)
+            "row_index":  i + 2,
             "date_saved": r[0],
             "title":      r[1],
             "price":      r[2],
@@ -692,26 +680,11 @@ async def get_prospects(status: str = Query(default="all")):
 
 @app.post("/call_prospect")
 async def call_prospect(request: Request):
-    """
-    Trigger an outbound Retell call to a FSBO prospect,
-    then mark that row as 'Called' in the sheet.
-
-    POST /call_prospect
-    Body: {
-        "phone":      "+15125550001",
-        "name":       "John's FSBO",        # injected into agent prompt
-        "price":      "$450,000",            # injected into agent prompt
-        "location":   "East Austin",         # injected into agent prompt
-        "row_index":  5                      # sheet row to mark Called
-    }
-    Response: { "ok": true, "call_id": "...", "to": "+1..." }
-    """
     data  = await request.json()
     phone = data.get("phone", "")
     if not phone:
         return {"ok": False, "error": "phone is required"}
 
-    # Normalise to E.164
     digits = re.sub(r"\D", "", phone)
     e164   = f"+{digits}" if digits.startswith("1") else f"+1{digits}"
 
@@ -741,7 +714,6 @@ async def call_prospect(request: Request):
     if not res.is_success:
         return {"ok": False, "error": call_data.get("message", str(call_data))}
 
-    # Mark prospect as Called in the sheet
     row_index = data.get("row_index")
     if row_index:
         service = _get_sheets_service()
@@ -763,14 +735,6 @@ async def call_prospect(request: Request):
 
 @app.post("/mark_prospect")
 async def mark_prospect(request: Request):
-    """
-    Update the Status column for a prospect row in the sheet.
-
-    POST /mark_prospect
-    Body: { "row_index": 5, "status": "Called" }
-    Valid statuses: "New" | "Called" | "Not Interested"
-    Response: { "ok": true }
-    """
     data      = await request.json()
     row_index = data.get("row_index")
     status    = data.get("status", "")
