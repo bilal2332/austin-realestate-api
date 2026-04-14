@@ -249,12 +249,11 @@ def run_fsbo_scraper() -> dict:
     listings = _fetch_listings_from_search()
     new_rows = []
 
-        for listing in listings:
+    for listing in listings:          # ← same level as 'service' above
         url = listing["url"]
         if not url or url in seen:
             continue
 
-        # Skip non-residential listings
         skip_keywords = ["warehouse", "office space", "commercial", "business", "storage", "cubework"]
         if any(kw in listing["title"].lower() for kw in skip_keywords):
             continue
